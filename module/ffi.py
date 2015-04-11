@@ -277,6 +277,7 @@ CDEF += """
     int xcb_poll_for_reply(xcb_connection_t *c, unsigned int request, void **reply, xcb_generic_error_t **error);
 
     xcb_connection_t *wrap(long ptr);
+    #define IS_NOT_BROKEN ...
 """
 
 
@@ -289,6 +290,8 @@ SOURCE = """
 xcb_connection_t *wrap(long ptr) {
     return (xcb_connection_t *) ptr;
 }
+
+#define IS_NOT_BROKEN 1
 """
 
 
