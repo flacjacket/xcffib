@@ -25,6 +25,8 @@ from .ffi import ffi, C, visualtype_to_c_struct  # noqa
 
 __xcb_proto_version__ = 'placeholder'
 
+print(C.IS_NOT_BROKEN)
+
 X_PROTOCOL = C.X_PROTOCOL
 X_PROTOCOL_REVISION = C.X_PROTOCOL_REVISION
 
