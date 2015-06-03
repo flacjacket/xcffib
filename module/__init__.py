@@ -21,11 +21,10 @@ import struct
 import weakref
 
 try:
-    from xcffib._ffi import ffi
+    from xcffib._ffi import ffi, lib
 except ImportError:
-    from xcffib.ffi_build import ffi
-
-lib = ffi.dlopen('libxcb.so')
+    from xcffib.ffi_build import ffi, SOURCE
+    lib = ffi.verify(SOURCE, libraries=['xcb'], ext_package='xcffib')
 
 __xcb_proto_version__ = 'placeholder'
 
