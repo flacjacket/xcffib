@@ -54,7 +54,7 @@ XCB_CONN_CLOSED_PARSE_ERR = lib.XCB_CONN_CLOSED_PARSE_ERR
 cffi_explicit_lifetimes = weakref.WeakKeyDictionary()
 
 
-def type_pad(t, i):
+def _type_pad(t, i):
     return -i & (3 if t > 4 else t - 1)
 
 
@@ -74,6 +74,85 @@ def visualtype_to_c_struct(vt):
     return s
 
 
+class Packer(object):
+
+    def __init__(self):
+        self.buf = six.BytesIO()
+
+    def pack(self, fmt, *data, **kwargs):
+        # Python 3 keyword only args (PEP3102) would be great here, but
+        # instead, just pop align out of kwargs
+        align = kwargs.pop('align', 4)
+        packed = struct.pack(fmt, *data)
+
+        self.buf.write(packed)
+        self.pad(fmt, align)
+
+    def write(self, data):
+        self.buf.write(data)
+
+    def pack_list(self, from_, pack_type):
+        """ Wire pack `from_` to the buffer. `pack_type` should be some
+        subclass of `xcffib.Struct`, or a string that can be passed to
+        `struct.pack`.
+        """
+        # We need from_ to not be empty
+        if len(from_) == 0:
+            return
+
+        if pack_type == 'c':
+            if isinstance(from_, bytes):
+                # Catch Python 3 bytes and Python 2 strings
+                # PY3 is "helpful" in that when you do tuple(b'foo') you get
+                # (102, 111, 111) instead of something more reasonable like
+                # (b'f', b'o', b'o'), so we rebuild from_ as a tuple of bytes
+                from_ = [six.int2byte(b) for b in six.iterbytes(from_)]
+            elif isinstance(from_, six.string_types):
+                # Catch Python 3 strings and Python 2 unicode strings, both of
+                # which we encode to bytes as utf-8
+                # Here we create the tuple of bytes from the encoded string
+                from_ = [six.int2byte(b) for b in bytearray(from_, 'utf-8')]
+            elif isinstance(from_[0], six.integer_types):
+                # Pack from_ as char array, where from_ may be an array of ints
+                # possibly greater than 256
+                def to_bytes(v):
+                    for _ in range(4):
+                        v, r = divmod(v, 256)
+                        yield r
+                from_ = [six.int2byte(b) for i in from_ for b in to_bytes(i)]
+
+        if isinstance(pack_type, six.string_types):
+            pack_type *= len(from_)
+            self.buf.write(struct.pack("=" + pack_type, *from_))
+            unpacked = struct.calcsize(pack_type)
+        else:
+            unpacked = 0
+            for item in from_:
+                # If we can't pack it, you'd better have packed and padded it yourself...
+                if isinstance(item, Struct):
+                    output = item.pack()
+                    unpacked += len(output)
+                    self.buf.write(output)
+                else:
+                    self.buf.write(item)
+
+        self.pad(pack_type, unpacked)
+
+    def pad(self, thing, length):
+        if isinstance(thing, type) and issubclass(thing, (Struct, Union)):
+            if hasattr(thing, "fixed_size"):
+                size = thing.fixed_size
+            else:
+                size = 4
+        else:
+            size = struct.calcsize(thing)
+
+        self.buf.write(b'\x00' * _type_pad(size, length))
+
+    def getvalue(self):
+        return self.buf.getvalue()
+
+
 class Unpacker(object):
 
     def __init__(self, known_max=None):
@@ -84,8 +163,7 @@ class Unpacker(object):
             self._resize(known_max)
 
     def pad(self, thing):
-        if isinstance(thing, type) and any(
-                [issubclass(thing, c) for c in [Struct, Union]]):
+        if isinstance(thing, type) and issubclass(thing, (Struct, Union)):
             if hasattr(thing, "fixed_size"):
                 size = thing.fixed_size
             else:
@@ -93,7 +171,7 @@ class Unpacker(object):
         else:
             size = struct.calcsize(thing)
 
-        self.offset += type_pad(size, self.offset)
+        self.offset += _type_pad(size, self.offset)
 
     def unpack(self, fmt, increment=True):
         size = struct.calcsize(fmt)
@@ -713,49 +791,6 @@ class Error(Response, XcffibException):
         Response.__init__(self, unpacker)
         XcffibException.__init__(self)
         self.code = unpacker.unpack('B', increment=False)
-
-
-def pack_list(from_, pack_type):
-    """ Return the wire packed version of `from_`. `pack_type` should be some
-    subclass of `xcffib.Struct`, or a string that can be passed to
-    `struct.pack`. You must pass `size` if `pack_type` is a struct.pack string.
-    """
-    # We need from_ to not be empty
-    if len(from_) == 0:
-        return bytes()
-
-    if pack_type == 'c':
-        if isinstance(from_, bytes):
-            # Catch Python 3 bytes and Python 2 strings
-            # PY3 is "helpful" in that when you do tuple(b'foo') you get
-            # (102, 111, 111) instead of something more reasonable like
-            # (b'f', b'o', b'o'), so we rebuild from_ as a tuple of bytes
-            from_ = [six.int2byte(b) for b in six.iterbytes(from_)]
-        elif isinstance(from_, six.string_types):
-            # Catch Python 3 strings and Python 2 unicode strings, both of
-            # which we encode to bytes as utf-8
-            # Here we create the tuple of bytes from the encoded string
-            from_ = [six.int2byte(b) for b in bytearray(from_, 'utf-8')]
-        elif isinstance(from_[0], six.integer_types):
-            # Pack from_ as char array, where from_ may be an array of ints
-            # possibly greater than 256
-            def to_bytes(v):
-                for _ in range(4):
-                    v, r = divmod(v, 256)
-                    yield r
-            from_ = [six.int2byte(b) for i in from_ for b in to_bytes(i)]
-
-    if isinstance(pack_type, six.string_types):
-        return struct.pack("=" + pack_type * len(from_), *from_)
-    else:
-        buf = six.BytesIO()
-        for item in from_:
-            # If we can't pack it, you'd better have packed it yourself...
-            if isinstance(item, Struct):
-                buf.write(item.pack())
-            else:
-                buf.write(item)
-        return buf.getvalue()
 
 
 def wrap(ptr):

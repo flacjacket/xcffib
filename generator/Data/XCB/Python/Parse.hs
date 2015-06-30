@@ -92,7 +92,7 @@ xform = map buildPython . dependencyOrder
     processXHeader :: XHeader
                    -> State TypeInfoMap (String, Suite ())
     processXHeader header = do
-      let imports = [mkImport "xcffib", mkImport "struct", mkImport "six"]
+      let imports = [mkImport "xcffib"]
           version = mkVersion header
           key = maybeToList $ mkKey header
           globals = [mkDict "_events", mkDict "_errors"]
@@ -342,43 +342,46 @@ structElemToPyPack _ m accessor (SField n typ _ _) =
        -- currently (xcb-proto 1.10) there are no direct packs of raw structs, so
        -- this is really only necessary if xpyb gets forward ported in the future if
        -- there are actually calls of this type.
-       CompositeType _ _ -> Right $ [(name, mkCall (name ++ ".pack") noArgs)]
+       CompositeType _ _ -> Right $ [(name
+                                    , mkCall "packer.write" [mkCall (name ++ ".pack") noArgs]
+                                    )]
 -- TODO: assert values are in enum?
 structElemToPyPack ext m accessor (X.List n typ _ _) =
   let name = accessor n
   in case m M.! typ of
-        BaseType c -> Right $ [(name, mkCall "xcffib.pack_list" [ mkName $ name
+        BaseType c -> Right $ [(name, mkCall "packer.pack_list" [ mkName $ name
                                                                 , mkStr c
                                                                 ])]
         CompositeType tExt c ->
           let c' = if tExt == ext then c else (tExt ++ "." ++ c)
-          in Right $ [(name, mkCall "xcffib.pack_list" ([ mkName $ name
+          in Right $ [(name, mkCall "packer.pack_list" ([ mkName $ name
                                                         , mkName c'
                                                         ]))]
 structElemToPyPack _ m accessor (ExprField name typ expr) =
   let e = (xExpressionToPyExpr accessor) expr
       name' = accessor name
   in case m M.! typ of
-       BaseType c -> Right $ [(name', mkCall "struct.pack" [ mkStr ('=' : c)
-                                                           , e
-                                                           ])]
-       CompositeType _ _ -> Right $ [(name',
-                                      mkCall (mkDot e "pack") noArgs)]
+       BaseType c -> Right $ [(name'
+                             , mkCall "packer.pack" [ mkStr ('=' : c), e ]
+                             )]
+       CompositeType _ _ -> Right $ [(name'
+                                    , mkCall "packer.write" [mkCall (mkDot e "pack") noArgs]
+                                    )]
 
 -- As near as I can tell here the padding param is unused.
 structElemToPyPack _ m accessor (ValueParam typ mask _ list) =
   case m M.! typ of
     BaseType c ->
-      let mask' = mkCall "struct.pack" [mkStr ('=' : c), mkName $ accessor mask]
-          list' = mkCall "xcffib.pack_list" [ mkName $ accessor list
+      let mask' = mkCall "packer.pack" [mkStr ('=' : c), mkName $ accessor mask]
+          list' = mkCall "packer.pack_list" [ mkName $ accessor list
                                             , mkStr "I"
                                             ]
       in Right $ [(mask, mask'), (list, list')]
     CompositeType _ _ -> error (
       "ValueParams other than CARD{16,32} not allowed.")
 
-buf :: Suite ()
-buf = [mkAssign "buf" (mkCall "six.BytesIO" noArgs)]
+packer :: Suite ()
+packer = [mkAssign "packer" (mkCall "xcffib.Packer" noArgs)]
 
 mkPackStmts :: String
             -> String
@@ -390,7 +393,7 @@ mkPackStmts :: String
 mkPackStmts ext name m accessor prefix membs =
   let packF = structElemToPyPack ext m accessor
       (toPack, stmts) = partitionEithers $ map packF membs
-      listWrites = map (flip StmtExpr () . mkCall "buf.write" . (: [])) lists
+      listStmt = map (flip StmtExpr ()) lists
       (args, keys) = let (as, ks) = unzip toPack in (catMaybes as, ks)
 
       -- In some cases (e.g. xproto.ConfigureWindow) there is padding after
@@ -409,10 +412,9 @@ mkPackStmts ext name m accessor prefix membs =
                        in map replacer listNames
                      _ -> listNames
       packStr = addStructData prefix $ intercalate "" keys
-      write = mkCall "buf.write" [mkCall "struct.pack"
-                                         (mkStr ('=' : packStr) : (map mkName args))]
+      write = mkCall "packer.pack" (mkStr ('=' : packStr) : (map mkName args))
       writeStmt = if length packStr > 0 then [StmtExpr write ()] else []
-  in (args ++ listNames', writeStmt ++ listWrites)
+  in (args ++ listNames', writeStmt ++ listStmt)
 
 mkPackMethod :: String
              -> String
@@ -425,8 +427,7 @@ mkPackMethod ext name m prefixAndOp structElems minLen =
   let accessor = ((++) "self.")
       (prefix, op) = case prefixAndOp of
                         Just ('x' : rest, i) ->
-                          let packOpcode = mkCall "struct.pack" [mkStr "=B", mkInt i]
-                              write = mkCall "buf.write" [packOpcode]
+                          let write = mkKwCall "packer.pack" [mkStr "=B", mkInt i] [ident "align"] [mkInt 1]
                           in (rest, [StmtExpr write ()])
                         Just (rest, _) -> error ("internal API error: " ++ show rest)
                         Nothing -> ("", [])
@@ -434,14 +435,14 @@ mkPackMethod ext name m prefixAndOp structElems minLen =
       extend = concat $ do
         len <- maybeToList minLen
         let bufLen = mkName "buf_len"
-            bufLenAssign = mkAssign bufLen $ mkCall "len" [mkCall "buf.getvalue" noArgs]
+            bufLenAssign = mkAssign bufLen $ mkCall "len" [mkCall "packer.getvalue" noArgs]
             test = (BinaryOp (LessThan ()) bufLen (mkInt len)) ()
             bufWriteLen = Paren (BinaryOp (Minus ()) (mkInt 32) bufLen ()) ()
-            extra = mkCall "struct.pack" [repeatStr "x" bufWriteLen]
-            writeExtra = [StmtExpr (mkCall "buf.write" [extra]) ()]
+            writeExtra = [StmtExpr (mkCall "packer.pack" [repeatStr "x" bufWriteLen]) ()]
         return $ [bufLenAssign, mkIf test writeExtra]
-      ret = [mkReturn $ mkCall "buf.getvalue" noArgs]
-  in mkMethod "pack" (mkParams ["self"]) $ buf ++ op ++ packStmts ++ extend ++ ret
+      ret = [mkReturn $ mkCall "packer.getvalue" noArgs]
+  --in mkMethod "pack" (mkParams ["self"]) $ buf ++ op ++ packStmts ++ extend ++ ret
+  in mkMethod "pack" (mkParams ["self"]) $ packer ++ op ++ packStmts ++ extend ++ ret
 
 data StructUnpackState = StructUnpackState {
   -- | stNeedsPad is whether or not a type_pad() is needed. As near
@@ -607,11 +608,11 @@ processXDecl ext (XRequest name opcode membs reply) = do
       allArgs = (mkParams $ "self" : args) ++ [checkedParam]
       mkArg = flip ArgExpr ()
       ret = mkReturn $ mkCall "self.send_request" ((map mkArg [ mkInt opcode
-                                                              , mkName "buf"
+                                                              , mkName "packer"
                                                               ])
                                                               ++ hasReply
                                                               ++ [argChecked])
-      requestBody = buf ++ packStmts ++ [ret]
+      requestBody = packer ++ packStmts ++ [ret]
       request = mkMethod name allArgs requestBody
   return $ Request request replyDecl
 processXDecl ext (XUnion name membs) = do

@@ -20,6 +20,7 @@ module Data.XCB.Python.PyHelpers (
   mkInt,
   mkAssign,
   mkCall,
+  mkKwCall,
   noArgs,
   mkEnum,
   mkName,
@@ -110,14 +111,20 @@ mkIncr name expr = AugmentedAssign (mkName name) (PlusAssign ()) expr ()
 
 class PseudoArgument a where
   getArgument :: a -> Argument ()
+  getKwArgument :: Ident () -> a -> Argument ()
 
 instance PseudoArgument (Expr ()) where
   getArgument p = ArgExpr p ()
+  getKwArgument p q = ArgKeyword p q ()
 instance PseudoArgument (Argument ()) where
   getArgument = id
+  getKwArgument = error "Can't create keyword argument from argument"
 
 mkCall :: (PseudoExpr a, PseudoArgument b) => a -> [b] -> Expr ()
 mkCall name args = Call (getExpr name) (map getArgument args) ()
+
+mkKwCall :: (PseudoExpr a, PseudoArgument b, PseudoArgument c) => a -> [b] -> [Ident ()] -> [c] -> Expr ()
+mkKwCall name args kwds kwargs = Call (getExpr name) ((map getArgument args) ++ (map (uncurry getKwArgument) (zip kwds kwargs))) ()
 
 noArgs :: [Argument ()]
 noArgs = []

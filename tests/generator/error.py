@@ -1,6 +1,4 @@
 import xcffib
-import struct
-import six
 MAJOR_VERSION = 2
 MINOR_VERSION = 2
 key = xcffib.ExtensionKey("ERROR")
@@ -15,10 +13,10 @@ class RequestError(xcffib.Error):
         self.bad_value, self.minor_opcode, self.major_opcode = unpacker.unpack("xx2xIHBx")
         self.bufsize = unpacker.offset - base
     def pack(self):
-        buf = six.BytesIO()
-        buf.write(struct.pack("=B", 1))
-        buf.write(struct.pack("=x2xIHBx", self.bad_value, self.minor_opcode, self.major_opcode))
-        return buf.getvalue()
+        packer = xcffib.Packer()
+        packer.pack("=B", 1, align=1)
+        packer.pack("=x2xIHBx", self.bad_value, self.minor_opcode, self.major_opcode)
+        return packer.getvalue()
 BadRequest = RequestError
 _errors[1] = RequestError
 xcffib._add_ext(key, errorExtension, _events, _errors)

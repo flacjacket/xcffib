@@ -1,6 +1,4 @@
 import xcffib
-import struct
-import six
 _events = {}
 _errors = {}
 class AxisInfo(xcffib.Struct):
@@ -12,9 +10,9 @@ class AxisInfo(xcffib.Struct):
         self.resolution, self.minimum, self.maximum = unpacker.unpack("Iii")
         self.bufsize = unpacker.offset - base
     def pack(self):
-        buf = six.BytesIO()
-        buf.write(struct.pack("=Iii", self.resolution, self.minimum, self.maximum))
-        return buf.getvalue()
+        packer = xcffib.Packer()
+        packer.pack("=Iii", self.resolution, self.minimum, self.maximum)
+        return packer.getvalue()
     fixed_size = 12
 class ValuatorInfo(xcffib.Struct):
     def __init__(self, unpacker):
@@ -26,8 +24,8 @@ class ValuatorInfo(xcffib.Struct):
         self.axes = xcffib.List(unpacker, AxisInfo, self.axes_len)
         self.bufsize = unpacker.offset - base
     def pack(self):
-        buf = six.BytesIO()
-        buf.write(struct.pack("=BBBBI", self.class_id, self.len, self.axes_len, self.mode, self.motion_size))
-        buf.write(xcffib.pack_list(self.axes, AxisInfo))
-        return buf.getvalue()
+        packer = xcffib.Packer()
+        packer.pack("=BBBBI", self.class_id, self.len, self.axes_len, self.mode, self.motion_size)
+        packer.pack_list(self.axes, AxisInfo)
+        return packer.getvalue()
 xcffib._add_ext(key, structExtension, _events, _errors)

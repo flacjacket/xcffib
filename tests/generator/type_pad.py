@@ -1,6 +1,4 @@
 import xcffib
-import struct
-import six
 _events = {}
 _errors = {}
 class CHARINFO(xcffib.Struct):
@@ -12,9 +10,9 @@ class CHARINFO(xcffib.Struct):
         self.left_side_bearing, self.right_side_bearing, self.character_width, self.ascent, self.descent, self.attributes = unpacker.unpack("hhhhhH")
         self.bufsize = unpacker.offset - base
     def pack(self):
-        buf = six.BytesIO()
-        buf.write(struct.pack("=hhhhhH", self.left_side_bearing, self.right_side_bearing, self.character_width, self.ascent, self.descent, self.attributes))
-        return buf.getvalue()
+        packer = xcffib.Packer()
+        packer.pack("=hhhhhH", self.left_side_bearing, self.right_side_bearing, self.character_width, self.ascent, self.descent, self.attributes)
+        return packer.getvalue()
     fixed_size = 12
 class FONTPROP(xcffib.Struct):
     def __init__(self, unpacker):
@@ -25,9 +23,9 @@ class FONTPROP(xcffib.Struct):
         self.name, self.value = unpacker.unpack("II")
         self.bufsize = unpacker.offset - base
     def pack(self):
-        buf = six.BytesIO()
-        buf.write(struct.pack("=II", self.name, self.value))
-        return buf.getvalue()
+        packer = xcffib.Packer()
+        packer.pack("=II", self.name, self.value)
+        return packer.getvalue()
     fixed_size = 8
 class ListFontsWithInfoReply(xcffib.Reply):
     def __init__(self, unpacker):
@@ -50,8 +48,8 @@ class ListFontsWithInfoCookie(xcffib.Cookie):
     reply_type = ListFontsWithInfoReply
 class type_padExtension(xcffib.Extension):
     def ListFontsWithInfo(self, max_names, pattern_len, pattern, is_checked=True):
-        buf = six.BytesIO()
-        buf.write(struct.pack("=xx2xHH", max_names, pattern_len))
-        buf.write(xcffib.pack_list(pattern, "c"))
-        return self.send_request(50, buf, ListFontsWithInfoCookie, is_checked=is_checked)
+        packer = xcffib.Packer()
+        packer.pack("=xx2xHH", max_names, pattern_len)
+        packer.pack_list(pattern, "c")
+        return self.send_request(50, packer, ListFontsWithInfoCookie, is_checked=is_checked)
 xcffib._add_ext(key, type_padExtension, _events, _errors)
