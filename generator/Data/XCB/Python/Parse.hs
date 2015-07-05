@@ -69,6 +69,13 @@ collectBindings = foldr collectR ([], [])
     collectR (Declaration decl) (defs, decls) = (defs, decl ++ decls)
     collectR Noop x = x
 
+data PackedElem =
+  ElemPad String |
+  ElemBase String String |
+  ElemComposite String String |
+  ElemList String (Expr ()) (Expr ()) (Maybe Int)
+  deriving (Show)
+
 parseXHeaders :: FilePath -> IO [XHeader]
 parseXHeaders fp = do
   files <- namesMatching $ fp </> "*.xml"
@@ -257,6 +264,43 @@ xEnumElemsToPyEnum accessor membs = reverse $ conv membs [] [0..]
           acc' = (name, expr') : acc
       in conv els acc' is'
     conv [] acc _ = acc
+
+-- Parse the GenStructElem's into a type that is easier to pack/unpack
+parseStructElem :: String
+                -> TypeInfoMap
+                -> GenStructElem Type
+                -> Maybe PackedElem
+
+parseStructElem _ _ (Doc _ _ _) = Nothing
+-- XXX: What does fd/switch mean? we should implement it correctly
+parseStructElem _ _ (Fd _) = Nothing
+parseStructElem _ _ (Switch _ _ _) = Nothing
+
+parseStructElem _ _ (Pad i) = Just $ ElemPad $ mkPad i
+-- The enum field is mostly for user information, so we ignore it.
+parseStructElem ext m (X.List n typ len _) =
+  let cons = case m M.! typ of
+               BaseType c -> mkStr c
+               CompositeType tExt c | ext /= tExt -> mkName $ tExt ++ "." ++ c
+               CompositeType _ c -> mkName c
+      attr = ((++) "self.")
+      exprLen = fromMaybe pyNone $ fmap (xExpressionToPyExpr attr) len
+      constLen = do
+        l <- len
+        getConst l
+  in Just $ ElemList n cons exprLen constLen
+
+-- The mask and enum fields are for user information, we can ignore them here.
+parseStructElem ext m (SField n typ _ _) =
+  let ret = case m M.! typ of
+              BaseType c -> ElemBase n c
+              CompositeType tExt c ->
+                let c' = if tExt == ext then c else tExt ++ "." ++ c
+                in ElemComposite n c'
+  in Just ret
+
+parseStructElem _ _ (ExprField _ _ _) = error "Only valid for requests"
+parseStructElem _ _ (ValueParam _ _ _ _) = error "Only valid for requests"
 
 -- Add the xcb_generic_{request,reply}_t structure data to the beginning of a
 -- pack string. This is a little weird because both structs contain a one byte
@@ -530,11 +574,11 @@ mkStructStyleUnpack prefix ext m membs =
 -- | Given a (qualified) type name and a target type, generate a TypeInfoMap
 -- updater.
 mkModify :: String -> String -> TypeInfo -> TypeInfoMap -> TypeInfoMap
-mkModify ext name ti m =
+mkModify ext name ti =
   let m' = M.fromList [ (UnQualType name, ti)
                       , (QualType ext name, ti)
                       ]
-  in M.union m m'
+  in flip M.union m'
 
 processXDecl :: String
              -> XDecl
