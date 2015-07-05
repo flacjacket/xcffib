@@ -322,49 +322,6 @@ mkPad :: Int -> String
 mkPad 1 = "x"
 mkPad i = (show i) ++ "x"
 
-structElemToPyUnpack :: Expr ()
-                     -> String
-                     -> TypeInfoMap
-                     -> GenStructElem Type
-                     -> Either (Maybe String, String)
-                               (String, Expr (), Expr (), Maybe Int)
-structElemToPyUnpack _ _ _ (Pad i) = Left (Nothing, mkPad i)
-
--- XXX: This is a cheap hack for noop, we should really do better.
-structElemToPyUnpack _ _ _ (Doc _ _ _) = Left (Nothing, "")
--- XXX: What does fd/switch mean? we should implement it correctly
-structElemToPyUnpack _ _ _ (Fd _) = Left (Nothing, "")
-structElemToPyUnpack _ _ _ (Switch _ _ _) = Left (Nothing, "")
-
--- The enum field is mostly for user information, so we ignore it.
-structElemToPyUnpack unpacker ext m (X.List n typ len _) =
-  let attr = ((++) "self.")
-      len' = fromMaybe pyNone $ fmap (xExpressionToPyExpr attr) len
-      cons = case m M.! typ of
-               BaseType c -> mkStr c
-               CompositeType tExt c | ext /= tExt -> mkName $ tExt ++ "." ++ c
-               CompositeType _ c -> mkName c
-      list = mkCall "xcffib.List" [ unpacker
-                                  , cons
-                                  , len'
-                                  ]
-      constLen = do
-        l <- len
-        getConst l
-  in Right (n, list, cons, constLen)
-
--- The mask and enum fields are for user information, we can ignore them here.
-structElemToPyUnpack unpacker ext m (SField n typ _ _) =
-  case m M.! typ of
-    BaseType c -> Left (Just n, c)
-    CompositeType tExt c ->
-      let c' = if tExt == ext then c else tExt ++ "." ++ c
-          field = mkCall c' [unpacker]
-      -- TODO: Ugh. Nothing here is wrong. Do we really need to carry the
-      -- length of these things around?
-      in Right (n, field, mkName c', Nothing)
-structElemToPyUnpack _ _ _ (ExprField _ _ _) = error "Only valid for requests"
-structElemToPyUnpack _ _ _ (ValueParam _ _ _ _) = error "Only valid for requests"
 
 structElemToPyPack :: String
                    -> TypeInfoMap
@@ -505,19 +462,22 @@ data StructUnpackState = StructUnpackState {
   stPacks :: String
 }
 
--- | Make a struct style (i.e. not union style) unpack.
-mkStructStyleUnpack :: String
-                    -> String
-                    -> TypeInfoMap
-                    -> [GenStructElem Type]
-                    -> (Suite (), Maybe Int)
-mkStructStyleUnpack prefix ext m membs =
-  let unpacked = map (structElemToPyUnpack (mkName "unpacker") ext m) membs
+
+-- Make a struct style (i.e. not union style) unpack.
+mkUnpack :: String
+         -> String
+         -> TypeInfoMap
+         -> Expr ()
+         -> [GenStructElem Type]
+         -> (Suite (), Maybe Int)
+mkUnpack prefix ext m unpacker membs =
+  let elems = mapMaybe (parseStructElem ext m) membs
       initial = StructUnpackState False [] prefix
-      (_, unpackStmts, size) = evalState (mkUnpackStmtsR unpacked) initial
-      base = [mkAssign "base" $ mkName "unpacker.offset"]
+      (_, unpackStmts, size) = evalState (mkUnpackStmts unpacker elems) initial
+      unpacker_offset = mkDot unpacker "offset"
+      base = [mkAssign "base" unpacker_offset]
       bufsize =
-        let rhs = BinaryOp (Minus ()) (mkName "unpacker.offset") (mkName "base") ()
+        let rhs = BinaryOp (Minus ()) unpacker_offset (mkName "base") ()
         in [mkAssign (mkAttr "bufsize") rhs]
       statements = base ++ unpackStmts ++ bufsize
   in (statements, size)
@@ -526,40 +486,70 @@ mkStructStyleUnpack prefix ext m membs =
 
       -- Apparently you only type_pad before unpacking Structs or Lists, never
       -- base types.
-      mkUnpackStmtsR :: [Either (Maybe String, String)
-                                (String, Expr (), Expr (), Maybe Int)]
-                     -> State StructUnpackState ([String], Suite (), Maybe Int)
+      mkUnpackStmts :: Expr ()
+                    -> [PackedElem]
+                    -> State StructUnpackState ([String], Suite (), Maybe Int)
 
-      mkUnpackStmtsR [] = flushAcc
+      mkUnpackStmts _ [] = flushAcc
 
-      mkUnpackStmtsR (Left (name, pack) : xs) = do
+      mkUnpackStmts unpacker' ((ElemPad pack) : xs) = do
         st <- get
         let packs = if "%c" `isInfixOf` (stPacks st)
                     then addStructData (stPacks st) pack
                     else (stPacks st) ++ pack
-        put $ st { stNames = stNames st ++ maybeToList name
+        put $ st { stPacks = packs }
+        mkUnpackStmts unpacker' xs
+
+      mkUnpackStmts unpacker' ((ElemBase name pack) : xs) = do
+        st <- get
+        let packs = if "%c" `isInfixOf` (stPacks st)
+                    then addStructData (stPacks st) pack
+                    else (stPacks st) ++ pack
+        put $ st { stNames = stNames st ++ [name]
                  , stPacks = packs
                  }
-        mkUnpackStmtsR xs
+        mkUnpackStmts unpacker' xs
 
-      mkUnpackStmtsR (Right (listName, list, cons, listSz) : xs) = do
+      mkUnpackStmts unpacker' ((ElemComposite name pack) : xs) = do
+        (packNames, packStmt, _) <- flushAcc
+        st <- get
+        put $ st { stNeedsPad = True }
+        let pad = if stNeedsPad st
+                  then [typePad unpacker' (mkName pack)]
+                  else []
+        (restNames, restStmts, _) <- mkUnpackStmts unpacker' xs
+        let comp = mkCall pack [unpacker']
+            compStmt = mkAssign (mkAttr name) comp
+        return ( packNames ++ [name] ++ restNames
+               , packStmt ++ pad ++ compStmt : restStmts
+               , Nothing
+               )
+
+      mkUnpackStmts unpacker' ((ElemList name cons listLen constLen) : xs) = do
         (packNames, packStmt, packSz) <- flushAcc
         st <- get
         put $ st { stNeedsPad = True }
         let pad = if stNeedsPad st
-                  then [typePad cons]
+                  then [typePad unpacker' cons]
                   else []
-        (restNames, restStmts, restSz) <- mkUnpackStmtsR xs
-        let totalSize = do
+        (restNames, restStmts, restSz) <- mkUnpackStmts unpacker' xs
+        let list = mkCall "xcffib.List" [ unpacker'
+                                        , cons
+                                        , listLen
+                                        ]
+            totalSize = do
                           before <- packSz
                           rest <- restSz
-                          listSz' <- listSz
-                          return $ before + rest + listSz'
-            listStmt = mkAssign (mkAttr listName) list
-        return ( packNames ++ [listName] ++ restNames
+                          constLen' <- constLen
+                          return $ before + rest + constLen'
+            listStmt = mkAssign (mkAttr name) list
+        return ( packNames ++ [name] ++ restNames
                , packStmt ++ pad ++ listStmt : restStmts
                , totalSize
                )
+
+      --mkUnpackStmts _ (ExprField _ _ _) = error "Only valid for requests"
+      --mkUnpackStmts _ (ValueParam _ _ _ _) = error "Only valid for requests"
 
       flushAcc :: State StructUnpackState ([String], Suite (), Maybe Int)
       flushAcc = do
@@ -569,7 +559,7 @@ mkStructStyleUnpack prefix ext m membs =
         put $ StructUnpackState needsPad [] ""
         return (args, assign, Just size)
 
-      typePad e = StmtExpr (mkCall "unpacker.pad" [e]) ()
+      typePad unpacker' e = StmtExpr (mkCall (mkDot unpacker' "pad") [e]) ()
 
 -- | Given a (qualified) type name and a target type, generate a TypeInfoMap
 -- updater.
@@ -596,7 +586,8 @@ processXDecl _ (XEnum name membs) =
   return $ Declaration [mkEnum name $ xEnumElemsToPyEnum id membs]
 processXDecl ext (XStruct n membs) = do
   m <- get
-  let (statements, len) = mkStructStyleUnpack "" ext m membs
+  let unpacker = mkName "unpacker"
+      (statements, len) = mkUnpack "" ext m unpacker membs
       pack = mkPackMethod ext n m Nothing membs Nothing
       fixedLength = maybeToList $ do
         theLen <- len
@@ -606,20 +597,22 @@ processXDecl ext (XStruct n membs) = do
   return $ Declaration [mkXClass n "xcffib.Struct" statements (pack : fixedLength)]
 processXDecl ext (XEvent name opcode membs noSequence) = do
   m <- get
-  let cname = name ++ "Event"
+  let unpacker = mkName "unpacker"
+      cname = name ++ "Event"
       prefix = if fromMaybe False noSequence then "x" else "x%c2x"
       pack = mkPackMethod ext name m (Just (prefix, opcode)) membs (Just 32)
-      (statements, _) = mkStructStyleUnpack prefix ext m membs
+      (statements, _) = mkUnpack prefix ext m unpacker membs
       eventsUpd = mkDictUpdate "_events" opcode cname
   return $ Declaration [ mkXClass cname "xcffib.Event" statements [pack]
                        , eventsUpd
                        ]
 processXDecl ext (XError name opcode membs) = do
   m <- get
-  let cname = name ++ "Error"
+  let unpacker = mkName "unpacker"
+      cname = name ++ "Error"
       prefix = "xx2x"
       pack = mkPackMethod ext name m (Just (prefix, opcode)) membs Nothing
-      (statements, _) = mkStructStyleUnpack prefix ext m membs
+      (statements, _) = mkUnpack prefix ext m unpacker membs
       errorsUpd = mkDictUpdate "_errors" opcode cname
       alias = mkAssign ("Bad" ++ name) (mkName cname)
   return $ Declaration [ mkXClass cname "xcffib.Error" statements [pack]
@@ -636,7 +629,8 @@ processXDecl ext (XRequest name opcode membs reply) = do
       cookieName = (name ++ "Cookie")
       replyDecl = concat $ maybeToList $ do
         reply' <- reply
-        let (replyStmts, _) = mkStructStyleUnpack "x%c2x4x" ext m reply'
+        let unpacker = mkName "unpacker"
+            (replyStmts, _) = mkUnpack "x%c2x4x" ext m unpacker reply'
             replyName = name ++ "Reply"
             theReply = mkXClass replyName "xcffib.Reply" replyStmts []
             replyType = mkAssign "reply_type" $ mkName replyName
@@ -661,24 +655,29 @@ processXDecl ext (XRequest name opcode membs reply) = do
   return $ Request request replyDecl
 processXDecl ext (XUnion name membs) = do
   m <- get
-  let unpackF = structElemToPyUnpack unpackerCopy ext m
-      (fields, listInfo) = partitionEithers $ map unpackF membs
-      toUnpack = concat $ map mkUnionUnpack fields
-      (names, exprs, _, _) = unzip4 listInfo
-      lists = map (uncurry mkAssign) $ zip (map mkAttr names) exprs
-      initMethod = lists ++ toUnpack
+  let elems = mapMaybe (parseStructElem ext m) membs
+      toUnpack = map mkUnionUnpack elems
       -- Here, we only want to pack the first member of the union, since every
       -- member is the same data and we don't want to repeatedly pack it.
       pack = mkPackMethod ext name m Nothing [head membs] Nothing
-      decl = [mkXClass name "xcffib.Union" initMethod [pack]]
+      decl = [mkXClass name "xcffib.Union" toUnpack [pack]]
   modify $ mkModify ext name (CompositeType ext name)
   return $ Declaration decl
   where
     unpackerCopy = mkCall "unpacker.copy" noArgs
-    mkUnionUnpack :: (Maybe String, String)
-                  -> Suite ()
-    mkUnionUnpack (n, typ) =
-      mkUnpackFrom unpackerCopy (maybeToList n) typ
+
+    mkUnionUnpack :: PackedElem
+                  -> Statement ()
+    mkUnionUnpack (ElemList n cons listLen _) =
+      let list = mkCall "xcffib.List" [ unpackerCopy
+                                      , cons
+                                      , listLen
+                                      ]
+      in mkAssign (mkAttr n) list
+    mkUnionUnpack (ElemComposite n c) =
+      let comp = mkCall c [unpackerCopy]
+      in mkAssign (mkAttr n) comp
+    mkUnionUnpack _ = error "Unable to Union unpack this type"
 
 processXDecl ext (XidUnion name _) =
   -- These are always unions of only XIDs.
