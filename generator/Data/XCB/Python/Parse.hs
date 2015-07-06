@@ -27,7 +27,6 @@ import Control.Monad.State.Strict
 import Data.Attoparsec.ByteString.Char8
 import Data.Bits
 import qualified Data.ByteString.Char8 as BS
-import Data.Either
 import Data.List
 import qualified Data.Map as M
 import Data.Tree
@@ -72,8 +71,10 @@ collectBindings = foldr collectR ([], [])
 data PackedElem =
   ElemPad String |
   ElemBase String String |
-  ElemComposite String String |
-  ElemList String (Expr ()) (Expr ()) (Maybe Int)
+  ElemComposite String (Expr ()) |
+  ElemList String (Expr ()) (Expr ()) (Maybe Int) |
+  ElemExpr String String (Expr ()) |
+  ElemValue String String String String
   deriving (Show)
 
 parseXHeaders :: FilePath -> IO [XHeader]
@@ -268,17 +269,18 @@ xEnumElemsToPyEnum accessor membs = reverse $ conv membs [] [0..]
 -- Parse the GenStructElem's into a type that is easier to pack/unpack
 parseStructElem :: String
                 -> TypeInfoMap
+                -> (String -> String)
                 -> GenStructElem Type
                 -> Maybe PackedElem
 
-parseStructElem _ _ (Doc _ _ _) = Nothing
+parseStructElem _ _ _ (Doc _ _ _) = Nothing
 -- XXX: What does fd/switch mean? we should implement it correctly
-parseStructElem _ _ (Fd _) = Nothing
-parseStructElem _ _ (Switch _ _ _) = Nothing
+parseStructElem _ _ _ (Fd _) = Nothing
+parseStructElem _ _ _ (Switch _ _ _) = Nothing
 
-parseStructElem _ _ (Pad i) = Just $ ElemPad $ mkPad i
+parseStructElem _ _ _ (Pad i) = Just $ ElemPad $ mkPad i
 -- The enum field is mostly for user information, so we ignore it.
-parseStructElem ext m (X.List n typ len _) =
+parseStructElem ext m _ (X.List n typ len _) =
   let cons = case m M.! typ of
                BaseType c -> mkStr c
                CompositeType tExt c | ext /= tExt -> mkName $ tExt ++ "." ++ c
@@ -291,16 +293,30 @@ parseStructElem ext m (X.List n typ len _) =
   in Just $ ElemList n cons exprLen constLen
 
 -- The mask and enum fields are for user information, we can ignore them here.
-parseStructElem ext m (SField n typ _ _) =
+parseStructElem ext m _ (SField n typ _ _) =
   let ret = case m M.! typ of
               BaseType c -> ElemBase n c
               CompositeType tExt c ->
-                let c' = if tExt == ext then c else tExt ++ "." ++ c
+                let c' = if tExt == ext then mkName c else mkDot tExt c
                 in ElemComposite n c'
   in Just ret
 
-parseStructElem _ _ (ExprField _ _ _) = error "Only valid for requests"
-parseStructElem _ _ (ValueParam _ _ _ _) = error "Only valid for requests"
+parseStructElem _ m acc (ExprField n typ expr) =
+  let e = (xExpressionToPyExpr acc) expr
+      name' = acc n
+  in case m M.! typ of
+       BaseType c -> Just $ ElemExpr name' c e
+       CompositeType _ _ -> Just $ ElemComposite name' e
+
+-- As near as I can tell here the padding param is unused.
+parseStructElem _ m acc (ValueParam typ mask _ list) =
+  case m M.! typ of
+    BaseType c ->
+      let mask' = acc mask
+          list' = acc list
+      in Just $ ElemValue mask' list' c "I"
+    CompositeType _ _ -> error (
+      "ValueParams other than CARD{16,32} not allowed.")
 
 -- Add the xcb_generic_{request,reply}_t structure data to the beginning of a
 -- pack string. This is a little weird because both structs contain a one byte
@@ -323,64 +339,6 @@ mkPad 1 = "x"
 mkPad i = (show i) ++ "x"
 
 
-structElemToPyPack :: String
-                   -> TypeInfoMap
-                   -> (String -> String)
-                   -> GenStructElem Type
-                   -> Either (Maybe String, String) [(String, Expr ())]
-structElemToPyPack _ _ _ (Pad i) = Left (Nothing, mkPad i)
--- TODO: implement doc, switch, and fd?
-structElemToPyPack _ _ _ (Doc _ _ _) = Left (Nothing, "")
-structElemToPyPack _ _ _ (Switch _ _ _) = Left (Nothing, "")
-structElemToPyPack _ _ _ (Fd _) = Left (Nothing, "")
-structElemToPyPack _ m accessor (SField n typ _ _) =
-  let name = accessor n
-  in case m M.! typ of
-       BaseType c -> Left (Just name, c)
-       -- XXX: be a little smarter here? we should really make sure that things
-       -- have a .pack(); if users are calling us via the old style api, we need
-       -- to support that as well. This isn't super necessary, though, because
-       -- currently (xcb-proto 1.10) there are no direct packs of raw structs, so
-       -- this is really only necessary if xpyb gets forward ported in the future if
-       -- there are actually calls of this type.
-       CompositeType _ _ -> Right $ [(name
-                                    , mkCall "packer.write" [mkCall (name ++ ".pack") noArgs]
-                                    )]
--- TODO: assert values are in enum?
-structElemToPyPack ext m accessor (X.List n typ _ _) =
-  let name = accessor n
-  in case m M.! typ of
-        BaseType c -> Right $ [(name, mkCall "packer.pack_list" [ mkName $ name
-                                                                , mkStr c
-                                                                ])]
-        CompositeType tExt c ->
-          let c' = if tExt == ext then c else (tExt ++ "." ++ c)
-          in Right $ [(name, mkCall "packer.pack_list" ([ mkName $ name
-                                                        , mkName c'
-                                                        ]))]
-structElemToPyPack _ m accessor (ExprField name typ expr) =
-  let e = (xExpressionToPyExpr accessor) expr
-      name' = accessor name
-  in case m M.! typ of
-       BaseType c -> Right $ [(name'
-                             , mkCall "packer.pack" [ mkStr ('=' : c), e ]
-                             )]
-       CompositeType _ _ -> Right $ [(name'
-                                    , mkCall "packer.write" [mkCall (mkDot e "pack") noArgs]
-                                    )]
-
--- As near as I can tell here the padding param is unused.
-structElemToPyPack _ m accessor (ValueParam typ mask _ list) =
-  case m M.! typ of
-    BaseType c ->
-      let mask' = mkCall "packer.pack" [mkStr ('=' : c), mkName $ accessor mask]
-          list' = mkCall "packer.pack_list" [ mkName $ accessor list
-                                            , mkStr "I"
-                                            ]
-      in Right $ [(mask, mask'), (list, list')]
-    CompositeType _ _ -> error (
-      "ValueParams other than CARD{16,32} not allowed.")
-
 packer :: Suite ()
 packer = [mkAssign "packer" (mkCall "xcffib.Packer" noArgs)]
 
@@ -392,10 +350,11 @@ mkPackStmts :: String
             -> [GenStructElem Type]
             -> ([String], Suite ())
 mkPackStmts ext name m accessor prefix membs =
-  let packF = structElemToPyPack ext m accessor
-      (toPack, stmts) = partitionEithers $ map packF membs
-      listStmt = map (flip StmtExpr ()) lists
-      (args, keys) = let (as, ks) = unzip toPack in (catMaybes as, ks)
+  let elems = mapMaybe (parseStructElem ext m id) membs
+      -- First we'll separate the explicit and implicit packs, and pack them
+      (expl, imp) = partition isExplicit elems
+      (expArgs, expPacks) = let (as, ks) = unzip $ map packExplicit expl in (catMaybes as, ks)
+      imp' = concat $ map (packImplicit accessor) imp
 
       -- In some cases (e.g. xproto.ConfigureWindow) there is padding after
       -- value_mask. The way the xml specification deals with this is by
@@ -403,19 +362,67 @@ mkPackStmts ext name m accessor prefix membs =
       -- implying it implicitly. Thus, we want to make sure that if we've already
       -- been told to pack something explcitly, that we don't also pack it
       -- implicitly.
-      (listNames, lists) = unzip $ filter (flip notElem args . fst) (concat stmts)
-      listNames' = case (ext, name) of
-                     -- XXX: QueryTextExtents has a field named "odd_length" with a
-                     -- fieldref of "string_len", so we fix it up here to match.
-                     ("xproto", "QueryTextExtents") ->
-                       let replacer "odd_length" = "string_len"
-                           replacer s = s
-                       in map replacer listNames
-                     _ -> listNames
-      packStr = addStructData prefix $ intercalate "" keys
-      write = mkCall "packer.pack" (mkStr ('=' : packStr) : (map mkName args))
-      writeStmt = if length packStr > 0 then [StmtExpr write ()] else []
-  in (args ++ listNames', writeStmt ++ listStmt)
+      (impArgs, impStmt) = unzip $ filter (flip notElem expArgs . fst) imp'
+
+      impArgs' = case (ext, name) of
+                   -- XXX: QueryTextExtents has a field named "odd_length" with a
+                   -- fieldref of "string_len", so we fix it up here to match.
+                   ("xproto", "QueryTextExtents") ->
+                     let replacer "odd_length" = "string_len"
+                         replacer s = s
+                     in map replacer impArgs
+                   _ -> impArgs
+      impStmt' = concat impStmt
+
+      packStr = addStructData prefix $ concat expPacks
+      write = mkCall "packer.pack" $ mkStr ('=' : packStr) : (map (mkName . accessor) expArgs)
+      expStmt = if length packStr > 0 then [StmtExpr write ()] else []
+  in (expArgs ++ impArgs', expStmt ++ impStmt')
+    where
+      isExplicit :: PackedElem -> Bool
+      isExplicit (ElemPad _) = True
+      isExplicit (ElemBase _ _) = True
+      isExplicit _ = False
+
+      packExplicit :: PackedElem
+                   -> (Maybe String, String)
+      packExplicit (ElemBase n c) = (Just n, c)
+      packExplicit (ElemPad c) = (Nothing, c)
+      packExplicit _ = error "Not explicitly packed"
+
+      packImplicit :: (String -> String)
+                   -> PackedElem
+                   -> [(String, Suite ())]
+
+      packImplicit acc (ElemComposite n _) =
+         -- XXX: be a little smarter here? we should really make sure that things
+         -- have a .pack(); if users are calling us via the old style api, we need
+         -- to support that as well. This isn't super necessary, though, because
+         -- currently (xcb-proto 1.10) there are no direct packs of raw structs, so
+         -- this is really only necessary if xpyb gets forward ported in the future if
+         -- there are actually calls of this type.
+        let comp = flip StmtExpr () $ mkCall "packer.write" [mkCall (acc n ++ ".pack") noArgs]
+        in [(n, [comp])]
+
+      -- TODO: assert values are in enum?
+      packImplicit acc (ElemList n cons _ _) =
+        let list = flip StmtExpr () $ mkCall "packer.pack_list" [ mkName (acc n)
+                                                                , cons
+                                                                ]
+        in [(n, [list])]
+
+      packImplicit _ (ElemExpr n c e) =
+        let expr = flip StmtExpr () $ mkCall "packer.pack" [mkStr ('=' : c), e]
+        in [(n, [expr])]
+
+      packImplicit acc (ElemValue mask list c c') =
+        let mask' = flip StmtExpr () $ mkCall "packer.pack" [ mkStr ('=' : c)
+                                                            , mkName mask]
+            list' = flip StmtExpr () $ mkCall "packer.pack_list" [ mkName (acc list)
+                                                                 , mkStr c'
+                                                                 ]
+        in [(mask, [mask']), (list, [list'])]
+      packImplicit _ _ = error "Not implicitly packed"
 
 mkPackMethod :: String
              -> String
@@ -425,14 +432,14 @@ mkPackMethod :: String
              -> Maybe Int
              -> Statement ()
 mkPackMethod ext name m prefixAndOp structElems minLen =
-  let accessor = ((++) "self.")
+  let acc = (++) "self."
       (prefix, op) = case prefixAndOp of
                         Just ('x' : rest, i) ->
                           let write = mkKwCall "packer.pack" [mkStr "=B", mkInt i] [ident "align"] [mkInt 1]
                           in (rest, [StmtExpr write ()])
                         Just (rest, _) -> error ("internal API error: " ++ show rest)
                         Nothing -> ("", [])
-      (_, packStmts) = mkPackStmts ext name m accessor prefix structElems
+      (_, packStmts) = mkPackStmts ext name m acc prefix structElems
       extend = concat $ do
         len <- maybeToList minLen
         let bufLen = mkName "buf_len"
@@ -471,7 +478,7 @@ mkUnpack :: String
          -> [GenStructElem Type]
          -> (Suite (), Maybe Int)
 mkUnpack prefix ext m unpacker membs =
-  let elems = mapMaybe (parseStructElem ext m) membs
+  let elems = mapMaybe (parseStructElem ext m id) membs
       initial = StructUnpackState False [] prefix
       (_, unpackStmts, size) = evalState (mkUnpackStmts unpacker elems) initial
       unpacker_offset = mkDot unpacker "offset"
@@ -515,7 +522,7 @@ mkUnpack prefix ext m unpacker membs =
         st <- get
         put $ st { stNeedsPad = True }
         let pad = if stNeedsPad st
-                  then [typePad unpacker' (mkName pack)]
+                  then [typePad unpacker' pack]
                   else []
         (restNames, restStmts, _) <- mkUnpackStmts unpacker' xs
         let comp = mkCall pack [unpacker']
@@ -548,8 +555,8 @@ mkUnpack prefix ext m unpacker membs =
                , totalSize
                )
 
-      --mkUnpackStmts _ (ExprField _ _ _) = error "Only valid for requests"
-      --mkUnpackStmts _ (ValueParam _ _ _ _) = error "Only valid for requests"
+      mkUnpackStmts _ ((ElemExpr _ _ _) : _) = error "Only valid for requests"
+      mkUnpackStmts _ ((ElemValue _ _ _ _) : _) = error "Only valid for requests"
 
       flushAcc :: State StructUnpackState ([String], Suite (), Maybe Int)
       flushAcc = do
@@ -655,7 +662,7 @@ processXDecl ext (XRequest name opcode membs reply) = do
   return $ Request request replyDecl
 processXDecl ext (XUnion name membs) = do
   m <- get
-  let elems = mapMaybe (parseStructElem ext m) membs
+  let elems = mapMaybe (parseStructElem ext m id) membs
       toUnpack = map mkUnionUnpack elems
       -- Here, we only want to pack the first member of the union, since every
       -- member is the same data and we don't want to repeatedly pack it.
