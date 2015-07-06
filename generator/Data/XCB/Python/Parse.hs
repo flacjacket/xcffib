@@ -74,7 +74,8 @@ data PackedElem =
   ElemComposite String (Expr ()) |
   ElemList String (Expr ()) (Expr ()) (Maybe Int) |
   ElemExpr String String (Expr ()) |
-  ElemValue String String String String
+  ElemValue String String String String |
+  ElemSwitch String (Expr ()) [(Expr (), [PackedElem])]
   deriving (Show)
 
 parseXHeaders :: FilePath -> IO [XHeader]
@@ -274,9 +275,21 @@ parseStructElem :: String
                 -> Maybe PackedElem
 
 parseStructElem _ _ _ (Doc _ _ _) = Nothing
--- XXX: What does fd/switch mean? we should implement it correctly
+-- XXX: What does switch mean? we should implement it correctly
 parseStructElem _ _ _ (Fd _) = Nothing
-parseStructElem _ _ _ (Switch _ _ _) = Nothing
+
+-- The switch fields pick the way to un/pack based a given expression
+parseStructElem ext m acc (Switch n expr bitCases) =
+  let expr' = xExpressionToPyExpr acc expr
+      bitCases' = map parseBitCase bitCases
+  in Just $ ElemSwitch n expr' bitCases'
+    where
+      parseBitCase :: GenBitCase Type
+                   -> (Expr (), [PackedElem])
+      parseBitCase (BitCase _ bcExpr bcElems) =
+        let bcExpr' = xExpressionToPyExpr acc bcExpr
+            bcElems' = mapMaybe (parseStructElem ext m acc) bcElems
+        in (bcExpr', bcElems')
 
 parseStructElem _ _ _ (Pad i) = Just $ ElemPad $ mkPad i
 -- The enum field is mostly for user information, so we ignore it.
@@ -422,6 +435,9 @@ mkPackStmts ext name m accessor prefix membs =
                                                                  , mkStr c'
                                                                  ]
         in [(mask, [mask']), (list, [list'])]
+
+      packImplicit _ (ElemSwitch _ _ _) = []
+
       packImplicit _ _ = error "Not implicitly packed"
 
 mkPackMethod :: String
@@ -553,6 +569,13 @@ mkUnpack prefix ext m unpacker membs =
         return ( packNames ++ [name] ++ restNames
                , packStmt ++ pad ++ listStmt : restStmts
                , totalSize
+               )
+
+      mkUnpackStmts unpacker' ((ElemSwitch _ _ _) : xs) = do
+        (restNames, restStmts, restSz) <- mkUnpackStmts unpacker' xs
+        return ( restNames
+               , restStmts
+               , restSz
                )
 
       mkUnpackStmts _ ((ElemExpr _ _ _) : _) = error "Only valid for requests"
