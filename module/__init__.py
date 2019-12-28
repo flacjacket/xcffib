@@ -304,6 +304,10 @@ class Protobj(object):
         if unpacker.known_max is not None:
             self.bufsize = unpacker.known_max
 
+    def pack(self):
+        # type () -> bytes
+        raise NotImplementedError()
+
 
 class Buffer(Protobj):
     def __init__(self, unpacker):
@@ -520,7 +524,7 @@ class Connection(object):
     xpyb. """
     def __init__(self, display=None, fd=-1, auth=None):
         if auth is not None:
-            [name, data] = auth.split(six.b(':'))
+            [name, data] = auth.split(b':')
 
             c_auth = ffi.new("xcb_auth_info_t *")
             c_auth.name = ffi.new('char[]', name)
@@ -755,13 +759,14 @@ class Error(Response, XcffibException):
 
 
 def pack_list(from_, pack_type):
+    # type: (typing.Any, typing.Any) -> bytes
     """ Return the wire packed version of `from_`. `pack_type` should be some
     subclass of `xcffib.Struct`, or a string that can be passed to
     `struct.pack`. You must pass `size` if `pack_type` is a struct.pack string.
     """
     # We need from_ to not be empty
     if len(from_) == 0:
-        return bytes()
+        return b""
 
     if pack_type == 'c':
         if isinstance(from_, bytes):
