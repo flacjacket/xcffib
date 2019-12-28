@@ -1,6 +1,6 @@
-import xcffib
+import io
 import struct
-import six
+import xcffib
 MAJOR_VERSION = 0
 MINOR_VERSION = 11
 key = xcffib.ExtensionKey("XPROTO")

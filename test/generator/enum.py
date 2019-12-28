@@ -1,6 +1,6 @@
-import xcffib
+import io
 import struct
-import six
+import xcffib
 _events = {}
 _errors = {}
 class DeviceUse:
