@@ -1,4 +1,4 @@
+black
 flake8
-autopep8
 six
 cffi>=0.8.2

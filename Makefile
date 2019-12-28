@@ -1,4 +1,4 @@
-AUTOPEP8=autopep8 --in-place --aggressive --aggressive
+BLACK=black -t py27
 
 XCBDIR?=$(shell pkg-config --variable=xcbincludedir xcb-proto)
 ifneq ($(XCBDIR),$(shell pkg-config --variable=xcbincludedir xcb-proto))
@@ -6,8 +6,6 @@ ifneq ($(XCBDIR),$(shell pkg-config --variable=xcbincludedir xcb-proto))
 else
 	XCBVER=$(shell pkg-config --modversion xcb-proto)
 endif
-NCPUS=$(shell grep -c processor /proc/cpuinfo)
-PARALLEL=$(shell which parallel)
 CABAL=cabal --config-file=./cabal.config
 GEN=$(CABAL) new-run exe:xcffibgen --
 
@@ -20,12 +18,8 @@ xcffib: module/*.py
 	@if [ "$(TRAVIS)" = true ]; then python xcffib/ffi_build.py; else python xcffib/ffi_build.py > /dev/null 2>&1 || python3 xcffib/ffi_build.py; fi
 
 .PHONY: xcffib-fmt
-xcffib-fmt: module/*.py
-ifeq (${PARALLEL},)
-	$(AUTOPEP8) ./xcffib/*.py
-else
-	find ./xcffib/*.py | parallel -j $(NCPUS) $(AUTOPEP8) '{}'
-endif
+xcffib-fmt: xcffib
+	$(BLACK) ./xcffib/*.py
 
 dist-newstyle:
 	$(CABAL) new-configure --enable-tests
