@@ -20,6 +20,7 @@ import functools
 import platform
 import six
 import struct
+import typing
 import weakref
 
 try:
@@ -32,9 +33,11 @@ if platform.system() == "Darwin":
 elif platform.system() == "Windows":
     soname = "libxcb.dll"
 else:
-    soname = ctypes.util.find_library("xcb")
-    if soname is None:
+    found_soname = ctypes.util.find_library("xcb")
+    if found_soname is None:
         soname = "libxcb.so"
+    else:
+        soname = found_soname
 lib = ffi.dlopen(soname)
 
 __xcb_proto_version__ = 'placeholder'
@@ -62,7 +65,7 @@ XCB_CONN_CLOSED_PARSE_ERR = lib.XCB_CONN_CLOSED_PARSE_ERR
 # XCB_CONN_CLOSED_INVALID_SCREEN = lib.XCB_CONN_CLOSED_INVALID_SCREEN
 # XCB_CONN_CLOSED_FDPASSING_FAILED = lib.XCB_CONN_CLOSED_FDPASSING_FAILED
 
-cffi_explicit_lifetimes = weakref.WeakKeyDictionary()
+cffi_explicit_lifetimes = weakref.WeakKeyDictionary()  # type: weakref.WeakKeyDictionary
 
 
 def type_pad(t, i):
@@ -494,6 +497,23 @@ class OffsetMap(object):
             raise IndexError(item)
 
 
+def _ensure_connected(f):
+    # type: (typing.Callable) -> typing.Callable
+    """
+    Check that the connection is valid both before and
+    after the function is invoked.
+    """
+    @functools.wraps(f)
+    def wrapper(*args):
+        self = args[0]
+        self.invalid()
+        try:
+            return f(*args)
+        finally:
+            self.invalid()
+    return wrapper
+
+
 class Connection(object):
 
     """ `auth` here should be '<name>:<data>', a format bequeathed to us from
@@ -558,22 +578,7 @@ class Connection(object):
         if err > 0:
             raise ConnectionException(err)
 
-    def ensure_connected(f):
-        """
-        Check that the connection is valid both before and
-        after the function is invoked.
-        """
-        @functools.wraps(f)
-        def wrapper(*args):
-            self = args[0]
-            self.invalid()
-            try:
-                return f(*args)
-            finally:
-                self.invalid()
-        return wrapper
-
-    @ensure_connected
+    @_ensure_connected
     def get_setup(self):
         self._setup = lib.xcb_get_setup(self._conn)
 
@@ -583,7 +588,7 @@ class Connection(object):
 
         return _setup(buf)
 
-    @ensure_connected
+    @_ensure_connected
     def get_screen_pointers(self):
         """
         Returns the xcb_screen_t for every screen
@@ -597,14 +602,14 @@ class Connection(object):
             screens.append(root_iter.data)
         return screens
 
-    @ensure_connected
+    @_ensure_connected
     def wait_for_event(self):
         e = lib.xcb_wait_for_event(self._conn)
         e = ffi.gc(e, lib.free)
         self.invalid()
         return self.hoist_event(e)
 
-    @ensure_connected
+    @_ensure_connected
     def poll_for_event(self):
         e = lib.xcb_poll_for_event(self._conn)
         self.invalid()
@@ -616,23 +621,23 @@ class Connection(object):
     def has_error(self):
         return lib.xcb_connection_has_error(self._conn)
 
-    @ensure_connected
+    @_ensure_connected
     def get_file_descriptor(self):
         return lib.xcb_get_file_descriptor(self._conn)
 
-    @ensure_connected
+    @_ensure_connected
     def get_maximum_request_length(self):
         return lib.xcb_get_maximum_request_length(self._conn)
 
-    @ensure_connected
+    @_ensure_connected
     def prefetch_maximum_request_length(self):
         return lib.xcb_prefetch_maximum_request_length(self._conn)
 
-    @ensure_connected
+    @_ensure_connected
     def flush(self):
         return lib.xcb_flush(self._conn)
 
-    @ensure_connected
+    @_ensure_connected
     def generate_id(self):
         return lib.xcb_generate_id(self._conn)
 
@@ -647,7 +652,7 @@ class Connection(object):
             buf = CffiUnpacker(c_error)
             raise error(buf)
 
-    @ensure_connected
+    @_ensure_connected
     def wait_for_reply(self, sequence):
         error_p = ffi.new("xcb_generic_error_t **")
         data = lib.xcb_wait_for_reply(self._conn, sequence, error_p)
@@ -671,7 +676,7 @@ class Connection(object):
         # length field."
         return CffiUnpacker(data, known_max=32 + reply.length * 4)
 
-    @ensure_connected
+    @_ensure_connected
     def request_check(self, sequence):
         cookie = ffi.new("xcb_void_cookie_t [1]")
         cookie[0].sequence = sequence
@@ -693,11 +698,11 @@ class Connection(object):
         buf = CffiUnpacker(e)
         return event(buf)
 
-    @ensure_connected
+    @_ensure_connected
     def send_request(self, flags, xcb_parts, xcb_req):
         return lib.xcb_send_request(self._conn, flags, xcb_parts, xcb_req)
 
-    @ensure_connected
+    @_ensure_connected
     def discard_reply(self, sequence):
         return lib.xcb_discard_reply(self._conn, sequence)
 

@@ -55,6 +55,7 @@ newtests:
 .PHONY: lint
 lint:
 	flake8 --config=./test/flake8.cfg ./module
+	mypy -p module
 
 .PHONY: htests
 htests:
